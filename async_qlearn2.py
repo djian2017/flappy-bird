@@ -86,6 +86,10 @@ class DQN:
             self.create_operations(num_actions)
             self.saver = tf.train.Saver()
         
+            log_file_name = datetime.datetime.now().strftime("log_%Y_%m_%d_%H_%M_%S.txt")
+            log_file = open(log_file_name, "w")
+            backup = sys.stdout
+            sys.stdout = Tee(sys.stdout, log_file)
 
 
         # episodes global counters
@@ -94,6 +98,8 @@ class DQN:
                 self.test(num_actions)
             else:
                 self.train(num_actions)
+
+        
                 
     def create_operations(self, num_actions):
 
@@ -278,6 +284,7 @@ class DQN:
                 # Print end of episode stats
                 if done:
                     print ("THREAD:", thread_id, "/ TIME", self.T, "/ TIMESTEP", t, "/ EPSILON", epsilon, "/ REWARD", episode_reward, "/ Q_MAX %.4f" % (mean_q/float(frames)), "/ EPSILON PROGRESS", t/float(FLAGS.anneal_epsilon_timesteps))
+                    print (episode_reward)
                     break
 
 
@@ -298,7 +305,7 @@ class DQN:
         # Set up game environments (one per thread)
         #envs = [gym.make(FLAGS.game) for i in range(FLAGS.num_concurrent)]
         #envs = [game_state = game.GameState() for i in range(FLAGS.num_concurrent)]
-        game_states = [game_state = game.GameState() for i in range(FLAGS.num_concurrent)]
+        game_states = [game.GameState() for i in range(FLAGS.num_concurrent)]
 
         if not os.path.exists(FLAGS.checkpoint_dir):
             os.makedirs(FLAGS.checkpoint_dir)
@@ -307,7 +314,7 @@ class DQN:
 
 
         # Start num_concurrent actor-learner training threads
-        actor_learner_threads = [threading.Thread(target=self.actor_learner_thread, args=(game_state[thread_id] thread_id, num_actions)) for thread_id in range(FLAGS.num_concurrent)]
+        actor_learner_threads = [threading.Thread(target=self.actor_learner_thread, args=(game_states[thread_id], thread_id, num_actions)) for thread_id in range(FLAGS.num_concurrent)]
         for t in actor_learner_threads:
             t.start()
 
