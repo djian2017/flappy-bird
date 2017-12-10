@@ -223,7 +223,11 @@ class DQN:
 
                 a_t = np.zeros([ACTIONS])
                 a_t[action_index] = 1
+                
+                self.threadLock.acquire()
                 x_t1_colored, reward, done = game_state.frame_step(a_t)
+                self.threadLock.release()
+                
                 x_t1 = skimage.color.rgb2gray(x_t1_colored)
                 x_t1 = skimage.transform.resize(x_t1,(80,80))
                # x_t1 = skimage.exposure.rescale_intensity(x_t1, out_range=(0, 255))
@@ -302,6 +306,7 @@ class DQN:
         # inititalize learning rate
         self.lr = FLAGS.learning_rate
         
+        self.threadLock = threading.Lock()
         # Set up game environments (one per thread)
         #envs = [gym.make(FLAGS.game) for i in range(FLAGS.num_concurrent)]
         #envs = [game_state = game.GameState() for i in range(FLAGS.num_concurrent)]
