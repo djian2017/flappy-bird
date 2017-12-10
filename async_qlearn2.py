@@ -13,12 +13,8 @@ sys.path.append("game/")
 import wrapped_flappy_bird as game
 
 os.environ["KERAS_BACKEND"] = "tensorflow"
-from keras import initializers
-from keras.initializers import normal, identity
-from keras.models import model_from_json
-from keras.models import Sequential
-from keras.layers.core import Dense, Dropout, Activation, Flatten
-from keras.layers.convolutional import Convolution2D, MaxPooling2D
+from keras.models import Model
+from keras.layers import Input, Flatten, Dense, Lambda, Convolution2D
 from keras import backend as K
 import random
 import copy
@@ -26,12 +22,13 @@ import threading
 #from environment import Env
 import time
 import tensorflow as tf
+import numpy as np
 
 import datetime # for logging timestamp
 
 flags = tf.app.flags
 flags.DEFINE_string('game', 'ppaquette/DoomBasic-v0', 'Name of the Doom game to play.')
-flags.DEFINE_integer('num_concurrent', 8, 'Number of concurrent actor-learner threads to use during training.')
+flags.DEFINE_integer('num_concurrent', 2, 'Number of concurrent actor-learner threads to use during training.')
 flags.DEFINE_integer('tmax', 80000000, 'Number of training timesteps.')
 flags.DEFINE_integer('width', 80, 'Scale screen to this width.')
 flags.DEFINE_integer('height', 80, 'Scale screen to this height.')
@@ -66,18 +63,14 @@ class Tee(object):
 def create_model(num_actions, agent_history_length, resized_width, resized_height):
     with tf.device("/cpu:0"):
         state = tf.placeholder("float", [None, resized_width, resized_height, agent_history_length])
-        model = Sequential()
-        model.add(Convolution2D(32, 8, 8, subsample=(4, 4), border_mode='same',input_shape=(resized_width, resized_height, agent_history_length)))  #80*80*4
-        model.add(Activation('relu'))
-        model.add(Convolution2D(64, 4, 4, subsample=(2, 2), border_mode='same'))
-        model.add(Activation('relu'))
-        model.add(Convolution2D(64, 3, 3, subsample=(1, 1), border_mode='same'))
-        model.add(Activation('relu'))
-        model.add(Flatten())
-        model.add(Dense(512))
-        model.add(Activation('relu'))
-        model.add(Dense(2))
-    return state, model
+        inputs = Input(shape=(resized_width, resized_height, agent_history_length,))
+        model = Convolution2D(nb_filter=16, nb_row=8, nb_col=8, subsample=(4,4), activation='relu', border_mode='same')(inputs)
+        model = Convolution2D(nb_filter=32, nb_row=4, nb_col=4, subsample=(2,2), activation='relu', border_mode='same')(model)
+        model = Flatten()(model)
+        model = Dense(output_dim=256, activation='relu')(model)
+        q_values = Dense(output_dim=num_actions, activation='linear')(model)
+        m = Model(input=inputs, output=q_values)
+    return state, m
 
 class DQN:
     
@@ -152,15 +145,16 @@ class DQN:
         # define traininf function
         self.grad_update = optimizer.minimize(cost, var_list=self.model_params)
 
+
     def sample_final_epsilon(self):
         possible_epsilon = [0.1]*4 + [0.5]*3 + [0.01]*3
         return random.choice(possible_epsilon)
     
-    def actor_learner_thread(self, thread_id, num_actions):
+    def actor_learner_thread(self, game_state, thread_id, num_actions):
 
         # create instance of Doom environment
         #env = Env(env, FLAGS.width, FLAGS.height, FLAGS.history_length, FLAGS.game_type)
-        game_state = game.GameState()
+        #game_state = game.GameState()
         # Initialize network gradients
         states = []
         actions = []
@@ -180,7 +174,7 @@ class DQN:
         x_t1 = skimage.color.rgb2gray(x_t1_colored)
         x_t = skimage.transform.resize(x_t1,(80,80))
         s_t = np.stack((x_t, x_t, x_t, x_t), axis=2)
-        state= s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])  #1*80*80*4
+        state= s_t.reshape(s_t.shape[0], s_t.shape[1], s_t.shape[2])  #1*80*80*4
         while self.T < self.TMAX:
         
             # Get initial game observation
@@ -228,8 +222,8 @@ class DQN:
                 x_t1 = skimage.transform.resize(x_t1,(80,80))
                # x_t1 = skimage.exposure.rescale_intensity(x_t1, out_range=(0, 255))
 
-                x_t1 = x_t1.reshape(1, x_t1.shape[0], x_t1.shape[1], 1) #1x80x80x1
-                new_state = np.append(x_t1, state[:, :, :, :3], axis=3)
+                x_t1 = x_t1.reshape( x_t1.shape[0], x_t1.shape[1], 1) #1x80x80x1
+                new_state = np.append(x_t1, state[ :, :, :3], axis=2)
 
                 # forward pass of target network. Get Q(s',a)
                 target_q_values = self.target_q_values.eval(session = self.session, feed_dict = {self.new_state : [new_state]})
@@ -293,6 +287,9 @@ class DQN:
     def train(self, num_actions):
 
         # Initialize target network weights
+        # Initialize all variables
+        init_op = tf.global_variables_initializer()
+        self.session.run(init_op)
         self.session.run(self.update_target)
 
         # inititalize learning rate
@@ -301,6 +298,7 @@ class DQN:
         # Set up game environments (one per thread)
         #envs = [gym.make(FLAGS.game) for i in range(FLAGS.num_concurrent)]
         #envs = [game_state = game.GameState() for i in range(FLAGS.num_concurrent)]
+        game_states = [game_state = game.GameState() for i in range(FLAGS.num_concurrent)]
 
         if not os.path.exists(FLAGS.checkpoint_dir):
             os.makedirs(FLAGS.checkpoint_dir)
@@ -309,7 +307,7 @@ class DQN:
 
 
         # Start num_concurrent actor-learner training threads
-        actor_learner_threads = [threading.Thread(target=self.actor_learner_thread, args=( thread_id, num_actions)) for thread_id in range(FLAGS.num_concurrent)]
+        actor_learner_threads = [threading.Thread(target=self.actor_learner_thread, args=(game_state[thread_id] thread_id, num_actions)) for thread_id in range(FLAGS.num_concurrent)]
         for t in actor_learner_threads:
             t.start()
 
@@ -338,7 +336,7 @@ class DQN:
         #print (s_t.shape)
 
         #In Keras, need to reshape
-        state= s_t.reshape(1, s_t.shape[0], s_t.shape[1], s_t.shape[2])  #1*80*80*4
+        state= s_t.reshape( s_t.shape[0], s_t.shape[1], s_t.shape[2])  #1*80*80*4
 
         for i_episode in xrange(FLAGS.num_eval_episodes):
             #state = env.get_initial_state()
@@ -358,7 +356,7 @@ class DQN:
                # x_t1 = skimage.exposure.rescale_intensity(x_t1, out_range=(0, 255))
 
                 x_t1 = x_t1.reshape(1, x_t1.shape[0], x_t1.shape[1], 1) #1x80x80x1
-                new_state = np.append(x_t1, state[:, :, :, :3], axis=3)
+                new_state = np.append(x_t1, state[ :, :, :3], axis=2)
 
                 state = new_state
                 episode_reward += reward
